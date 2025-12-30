@@ -1,0 +1,196 @@
+@Entity
+@Table(name = "equipment", schema = "aps")
+public class Equipment {
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long equipmentId;
+    
+    private String equipmentNo;
+    private String functionCategory; // REACTOR, CENTRIFUGE, DRYER, THREE_IN_ONE
+    private String plantArea;         // 天津, 绍兴
+    private String workshop;
+    private String zone;
+    private String bay;
+    
+    private Integer tempLevel;        // 1: Normal, 2: Cryogenic, 3: High Temp
+    private Boolean bergmeal;         // 是否硅藻土/硅胶专用
+    private Integer hydrogenateFlow;  // 1: 加氢
+    private Boolean cleanspace;       // 是否洁净区
+    
+    // 省略 Getter/Setter
+}
+
+
+
+
+@PlanningEntity
+public class BatchStep {
+    @PlanningId
+    private Long id;
+    
+    private String projectId;
+    private Integer stepNumber;
+    private Integer oebLevel;         // 4 代表 OEB4
+    private Boolean needsSilicon;     // 是否进硅胶/硅藻土
+    private Boolean isHighPressure;   // 是否高压
+    private Double durationHours;
+    
+    // 关键：排产变量 - 关联到设备
+    @PlanningVariable(valueRangeProviderRefs = "equipmentRange")
+    private Equipment assignedEquipment;
+
+    // 时间变量（简化版，实际建议使用 LocalDateTime）
+    @PlanningVariable(valueRangeProviderRefs = "startTimeRange")
+    private Integer startTime; 
+
+    // 辅助逻辑
+    public Integer getEndTime() {
+        return startTime + durationHours.intValue();
+    }
+    
+    // 省略其他属性
+}
+
+2. 约束提供者 (Constraint Provider)
+这是实现你所有“排产原则”的地方。
+public class ProductionConstraintProvider implements ConstraintProvider {
+
+    @Override
+    public Constraint[] defineConstraints(ConstraintFactory factory) {
+        return new Constraint[] {
+            // 1. OEB4 约束
+            oeb4TianjinRule(factory),
+            // 2. 绍兴硅胶专用釜约束
+            shaoxingSiliconRule(factory),
+            // 3. 605车间加氢溶解同Bay约束
+            hydrogenationSameBayRule(factory),
+            // 4. 设备冲突（硬约束：同一设备同一时间只能做一个项目）
+            equipmentConflict(factory),
+            // 5. 尽量同一项目在同一Bay（软约束）
+            preferSameBayForProject(factory),
+            // 6. 离心机优先级：卧刮 > 平板
+            preferPeelerCentrifuge(factory)
+        };
+    }
+
+    // 原则1：OEB4项目在天津需单独间，尽量三合一
+    private Constraint oeb4TianjinRule(ConstraintFactory factory) {
+        return factory.forEach(BatchStep.class)
+                .filter(step -> step.getOebLevel() == 4 && "天津".equals(step.getAssignedEquipment().getPlantArea()))
+                .filter(step -> !"THREE_IN_ONE".equals(step.getAssignedEquipment().getFunctionCategory()))
+                .penalize(HardSoftScore.ofHard(100))
+                .asConstraint("OEB4尽量使用三合一");
+    }
+
+    // 原则2：绍兴工厂硅胶/硅藻土必须使用专用釜
+    private Constraint shaoxingSiliconRule(ConstraintFactory factory) {
+        return factory.forEach(BatchStep.class)
+                .filter(step -> "绍兴".equals(step.getAssignedEquipment().getPlantArea()))
+                .filter(step -> step.getNeedsSilicon() && !step.getAssignedEquipment().getBergmeal())
+                .penalize(HardSoftScore.ofHard(1000))
+                .asConstraint("绍兴硅胶必须使用专用釜");
+    }
+
+    // 原则3：605车间溶解釜与高压釜必须在同一Bay
+    private Constraint hydrogenationSameBayRule(ConstraintFactory factory) {
+        return factory.forEachUniquePair(BatchStep.class,
+                Joiners.equal(BatchStep::getProjectId),
+                Joiners.equal(step -> step.getAssignedEquipment().getWorkshop()))
+                .filter((s1, s2) -> "605".equals(s1.getAssignedEquipment().getWorkshop()))
+                .filter((s1, s2) -> s1.getAssignedEquipment().getBay() != s2.getAssignedEquipment().getBay())
+                .penalize(HardSoftScore.ofHard(50))
+                .asConstraint("605车间溶解和加氢必须同Bay");
+    }
+
+    // 软原则：同一项目尽量在同一Bay内
+    private Constraint preferSameBayForProject(ConstraintFactory factory) {
+        return factory.forEachUniquePair(BatchStep.class,
+                Joiners.equal(BatchStep::getProjectId))
+                .filter((s1, s2) -> !s1.getAssignedEquipment().getBay().equals(s2.getAssignedEquipment().getBay()))
+                .penalize(HardSoftScore.ofSoft(10))
+                .asConstraint("尽量同一Bay生产");
+    }
+    
+    // 软原则：离心优先用卧刮 (Peeler)
+    private Constraint preferPeelerCentrifuge(ConstraintFactory factory) {
+        return factory.forEach(BatchStep.class)
+                .filter(step -> "CENTRIFUGE".equals(step.getAssignedEquipment().getFunctionCategory()))
+                .filter(step -> !step.getAssignedEquipment().getEquipmentName().contains("卧刮"))
+                .penalize(HardSoftScore.ofSoft(5))
+                .asConstraint("优先使用卧刮离心机");
+    }
+
+    // 硬原则：设备时间不重叠
+    private Constraint equipmentConflict(ConstraintFactory factory) {
+        return factory.forEachUniquePair(BatchStep.class,
+                Joiners.equal(BatchStep::getAssignedEquipment),
+                Joiners.overlapping(BatchStep::getStartTime, BatchStep::getEndTime))
+                .penalize(HardSoftScore.ofHard(1000))
+                .asConstraint("设备时间冲突");
+    }
+}
+
+
+3. 特殊逻辑实现：603车间连通区域
+由于 603 车间 Bay 1-20 是按组连通的，我们可以写一个工具方法或在约束中加入逻辑：
+code
+Java
+public boolean isConnected603(String bay1, String bay2) {
+    // 定义映射：1-4是一组，5-8是一组...
+    int b1 = Integer.parseInt(bay1);
+    int b2 = Integer.parseInt(bay2);
+    return (b1 - 1) / 4 == (b2 - 1) / 4;
+}
+
+然后在约束中使用此逻辑，若同一项目的不同步骤超出了连通区域，则给予惩罚。
+4. 解决“反应釜空置等待离心烘干”原则
+这是一个典型的 资源锁定 (Resource Locking) 问题。在 Timefold 中，你可以通过增加 BatchStep 的逻辑结束时间来实现：
+code
+Java
+// 在 BatchStep 实体中
+public Integer getEffectiveEndTime() {
+    if (hasNextStepUsingSameReactor()) {
+        return getEndTime(); 
+    } else {
+        // 如果下一步是离心/烘干，且该釜需要等待
+        return getEndTime() + followingCentrifugeDuration;
+    }
+}
+5. Service 层调用 (Spring Data JPA 整合)
+code
+Java
+@Service
+public class SchedulingService {
+
+    @Autowired
+    private EquipmentRepository equipmentRepository;
+    @Autowired
+    private SolverManager<ProductionSchedule, Long> solverManager;
+
+    public void solve() {
+        // 1. 从数据库加载可用设备
+        List<Equipment> equipmentList = equipmentRepository.findByUsable(1);
+        
+        // 2. 构建初始解 (从数据库加载待排产批次)
+        List<BatchStep> stepList = loadPendingSteps();
+        
+        ProductionSchedule problem = new ProductionSchedule(equipmentList, stepList);
+
+        // 3. 调用 Timefold 求解
+        SolverJob<ProductionSchedule, Long> solverJob = solverManager.solve(1L, problem);
+        
+        try {
+            ProductionSchedule solution = solverJob.getFinalBestSolution();
+            // 4. 保存结果回数据库
+            saveSolution(solution);
+        } catch (InterruptedException | ExecutionException e) {
+            e.printStackTrace();
+        }
+    }
+}
+核心建议：
+数据清洗：由于涉及材质（texture）、温度级别（temp_level）等硬性匹配，建议在调用求解器前，先通过 JPA 预过滤掉绝对不可能的设备，缩小 Timefold 的搜索范围（Value Range Provider）。
+603车间逻辑：建议在 Equipment 实体中增加一个 connectedGroup 字段，例如 Bay1-4 标记为 "603_G1"，这样在写约束时直接对比字符串是否相等，效率最高。
+多步链接：为了实现“尽量一个车间干完”，使用 forEachUniquePair 约束，对 projectId 相同但 workshop 不同的对进行重度 Soft Penalty。
+这种方案结合了 JPA 的持久化能力和 Timefold 的启发式搜索能力，能够处理这种具有高度约束的化工生产排产场景。
+

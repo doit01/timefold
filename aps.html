@@ -1,0 +1,438 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OEB4 智慧排产系统 Pro</title>
+    <script src="https://cdn.sheetjs.com/xlsx-0.19.3/package/dist/xlsx.full.min.js"></script>
+    <style>
+        :root {
+            --sidebar-w: 200px;
+            --cell-w: 60px;
+            --row-h: 50px;
+            --header-h: 70px;
+            --oeb4-color: #ff4d4f;
+            --normal-color: #1890ff;
+            --clean-color: #52c41a;
+            --dark-bg: #001529;
+        }
+
+        body { font-family: "Segoe UI", "Microsoft YaHei", sans-serif; margin: 0; background: #f0f2f5; overflow: hidden; }
+
+        /* 登录模块 */
+        #loginOverlay { position: fixed; inset: 0; background: var(--dark-bg); z-index: 5000; display: flex; align-items: center; justify-content: center; }
+        .login-box { background: white; padding: 40px; border-radius: 12px; width: 320px; text-align: center; box-shadow: 0 20px 50px rgba(0,0,0,0.5); }
+        .login-box input { width: 100%; padding: 12px; margin: 10px 0; border: 1px solid #ddd; border-radius: 6px; box-sizing: border-box; }
+        .login-box button { width: 100%; padding: 12px; background: #1890ff; color: white; border: none; border-radius: 6px; cursor: pointer; font-size: 16px; font-weight: bold; }
+
+        /* 顶部工具栏 */
+        .navbar { height: var(--header-h); background: var(--dark-bg); color: white; display: flex; align-items: center; padding: 0 25px; gap: 20px; box-shadow: 0 2px 10px rgba(0,0,0,0.2); position: relative; z-index: 100; }
+        .navbar select { padding: 8px; border-radius: 4px; background: #1f3a56; color: white; border: none; outline: none; }
+        .user-tag { margin-left: auto; font-size: 14px; background: rgba(255,255,255,0.1); padding: 5px 15px; border-radius: 20px; }
+        .btn { padding: 8px 16px; border-radius: 4px; border: none; cursor: pointer; font-weight: bold; color: white; font-size: 13px; }
+
+        /* 核心甘特图容器 - 唯一滚动条 */
+        .gantt-viewport {
+            height: calc(100vh - var(--header-h));
+            overflow: auto; /* 全局滚动条 */
+            position: relative;
+            background: white;
+        }
+
+        .gantt-table {
+            display: inline-block; /* 允许内部撑开宽度 */
+            min-width: 100%;
+            position: relative;
+            border-collapse: collapse;
+        }
+
+        /* 粘性日期表头 (Top Sticky) */
+        .date-header-row {
+            display: flex;
+            position: sticky;
+            top: 0;
+            z-index: 40; /* 高于左侧和内容 */
+            background: #fafafa;
+        }
+
+        /* 粘性左上角 (Corner Sticky) */
+        .corner-cell {
+            width: var(--sidebar-w);
+            height: 60px;
+            background: #eee;
+            position: sticky;
+            top: 0;
+            left: 0;
+            z-index: 50; /* 最高优先级 */
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: bold;
+            border-right: 2px solid #ddd;
+            border-bottom: 2px solid #ddd;
+        }
+
+        .date-cell {
+            width: var(--cell-w);
+            height: 60px;
+            flex-shrink: 0;
+            border-right: 1px solid #eee;
+            border-bottom: 2px solid #ddd;
+            text-align: center;
+            font-size: 12px;
+            padding-top: 10px;
+            box-sizing: border-box;
+        }
+
+        /* 绘图行 (Row) */
+        .equip-row {
+            display: flex;
+            height: var(--row-h);
+            position: relative;
+        }
+
+        /* 粘性设备列 (Left Sticky) */
+        .equip-name-cell {
+            width: var(--sidebar-w);
+            background: #fff;
+            position: sticky;
+            left: 0;
+            z-index: 30;
+            border-right: 2px solid #ddd;
+            border-bottom: 1px solid #eee;
+            display: flex;
+            align-items: center;
+            padding-left: 15px;
+            font-size: 13px;
+            font-weight: 500;
+            box-sizing: border-box;
+            box-shadow: 2px 0 5px rgba(0,0,0,0.05);
+        }
+
+        /* 网格背景格子 */
+        .grid-cell {
+            width: var(--cell-w);
+            flex-shrink: 0;
+            border-right: 1px solid #f0f0f0;
+            border-bottom: 1px solid #f0f0f0;
+            box-sizing: border-box;
+            cursor: cell;
+        }
+        .grid-cell:hover { background-color: #f9fbff; }
+
+        /* 任务条 (绝对定位) */
+        .task-bar {
+            position: absolute;
+            height: 36px;
+            top: 7px;
+            border-radius: 4px;
+            color: white;
+            font-size: 11px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            z-index: 35; /* 位于网格之上，粘性列之下 */
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            cursor: pointer;
+            padding: 0 5px;
+            box-sizing: border-box;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        .task-bar .op { font-size: 9px; opacity: 0.8; }
+
+        /* 弹窗 */
+        .overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.5); display: none; z-index: 1000; }
+        .modal {
+            position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
+            background: white; padding: 25px; border-radius: 8px; width: 340px;
+            display: none; z-index: 1001; box-shadow: 0 10px 40px rgba(0,0,0,0.3);
+        }
+        .modal h3 { margin-top: 0; font-size: 18px; border-bottom: 1px solid #eee; padding-bottom: 10px; }
+        .form-group { margin-bottom: 12px; }
+        .form-group label { display: block; font-size: 12px; color: #888; margin-bottom: 4px; }
+        .form-group input, .form-group select { width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px; box-sizing: border-box; }
+        .btn-group { display: flex; gap: 10px; margin-top: 20px; }
+    </style>
+</head>
+<body>
+
+<!-- 登录 -->
+<div id="loginOverlay">
+    <div class="login-box">
+        <h2>排产管控系统登录</h2>
+        <input type="text" id="username" placeholder="用户名" value="admin">
+        <input type="password" id="password" placeholder="密码" value="123456">
+        <button onclick="doLogin()">进入系统</button>
+    </div>
+</div>
+
+<!-- 导航 -->
+<div class="navbar">
+    <div style="font-size: 20px; font-weight: bold;">OEB4 排产智慧看板</div>
+    
+    <div style="display:flex; align-items:center; gap:8px;">
+        <span style="font-size:14px;">车间筛选:</span>
+        <select id="wsFilter" onchange="loadWorkshop()"></select>
+    </div>
+
+    <button class="btn" style="background:#52c41a" onclick="doExport()">导出 EXCEL</button>
+    <button class="btn" style="background:#ff4d4f; font-size:10px;" onclick="doReset()">数据重置</button>
+
+    <div class="user-tag" id="userDisplay">未登录</div>
+</div>
+
+<!-- 甘特图内容区 -->
+<div class="gantt-viewport" id="ganttViewport">
+    <div class="gantt-table" id="ganttTable">
+        <!-- 第一行：粘性日期头 -->
+        <div class="date-header-row" id="dateHeaderRow">
+            <div class="corner-cell">设备名称 \ 日期</div>
+            <!-- 日期单元格动态注入 -->
+        </div>
+        <!-- 设备行动态注入 -->
+        <div id="equipRowsContainer"></div>
+    </div>
+</div>
+
+<!-- 弹窗 -->
+<div class="overlay" id="overlay" onclick="closeModal()"></div>
+<div class="modal" id="taskModal">
+    <h3 id="modalTitle">任务排产</h3>
+    <input type="hidden" id="editId">
+    <div class="form-group">
+        <label>任务名称/批号</label>
+        <input type="text" id="taskName">
+    </div>
+    <div class="form-group" style="display:flex; gap:10px;">
+        <div style="flex:1"><label>开始日期</label><input type="date" id="taskStart"></div>
+        <div style="flex:1"><label>生产天数</label><input type="number" id="taskDays" min="1"></div>
+    </div>
+    <div class="form-group">
+        <label>项目类型</label>
+        <select id="taskType">
+            <option value="normal">普通项目</option>
+            <option value="oeb4">OEB4高活性</option>
+            <option value="clean">设备清场</option>
+        </select>
+    </div>
+    <div style="font-size:11px; color:#999; margin-bottom:15px;">操作人: <span id="opLabel"></span></div>
+    <div class="btn-group">
+        <button class="btn" id="btnDel" style="background:#ff4d4f; display:none" onclick="delTask()">删除</button>
+        <button class="btn" style="background:#eee; color:#333" onclick="closeModal()">取消</button>
+        <button class="btn" style="background:#1890ff; flex:2" onclick="saveTask()">保存计划</button>
+    </div>
+</div>
+
+<script>
+    // 1. 初始化 150 台设备
+    const workshops = Array.from({length:10}, (_, i) => `车间 ${String(i+1).padStart(2,'0')}`);
+    const allEquips = [];
+    workshops.forEach(ws => {
+        for(let i=1; i<=15; i++) {
+            allEquips.push({ id: `E-${ws}-${i}`, name: `${ws}-设备${i}`, ws: ws });
+        }
+    });
+
+    let tasks = JSON.parse(localStorage.getItem('gantt_final_db')) || [];
+    let currentUser = '';
+    const startDateBase = new Date(); startDateBase.setHours(0,0,0,0);
+
+    // 2. 登录
+    function doLogin() {
+        const u = document.getElementById('username').value;
+        const p = document.getElementById('password').value;
+        if(u === 'admin' && p === '123456') {
+            currentUser = u;
+            document.getElementById('loginOverlay').style.display = 'none';
+            document.getElementById('userDisplay').innerText = '👤 当前账号: ' + u;
+            init();
+        } else alert('账号密码不对');
+    }
+
+    // 3. 页面初始化
+    function init() {
+        const filter = document.getElementById('wsFilter');
+        workshops.forEach(w => {
+            const opt = document.createElement('option');
+            opt.value = w; opt.innerText = w;
+            filter.appendChild(opt);
+        });
+
+        // 渲染日期头
+        const headerRow = document.getElementById('dateHeaderRow');
+        for(let i=0; i<365; i++) {
+            const d = new Date(startDateBase); d.setDate(d.getDate() + i);
+            const cell = document.createElement('div');
+            cell.className = 'date-cell';
+            if(d.getDay()===0||d.getDay()===6) cell.style.background = '#f5f5f5';
+            cell.innerHTML = `${d.getMonth()+1}/${d.getDate()}<br><small>${['日','一','二','三','四','五','六'][d.getDay()]}</small>`;
+            headerRow.appendChild(cell);
+        }
+        loadWorkshop();
+    }
+
+    // 4. 车间加载 (核心布局重排)
+    function loadWorkshop() {
+        const activeWs = document.getElementById('wsFilter').value;
+        const container = document.getElementById('equipRowsContainer');
+        container.innerHTML = '';
+
+        const filtered = allEquips.filter(e => e.ws === activeWs);
+        filtered.forEach((eq, idx) => {
+            const row = document.createElement('div');
+            row.className = 'equip-row';
+            row.id = 'row-' + eq.id;
+
+            // 粘性名称列
+            const nameCell = document.createElement('div');
+            nameCell.className = 'equip-name-cell';
+            nameCell.innerText = eq.name;
+            row.appendChild(nameCell);
+
+            // 365个网格背景
+            for(let j=0; j<365; j++) {
+                const g = document.createElement('div');
+                g.className = 'grid-cell';
+                g.onclick = (e) => openTaskModal(eq.id, j);
+                row.appendChild(g);
+            }
+            container.appendChild(row);
+        });
+        renderTasks();
+    }
+
+    // 5. 任务渲染
+    function renderTasks() {
+        document.querySelectorAll('.task-bar').forEach(b => b.remove());
+        const activeWs = document.getElementById('wsFilter').value;
+        const wsEquips = allEquips.filter(e => e.ws === activeWs);
+        const wsEquipIds = wsEquips.map(e => e.id);
+
+        tasks.forEach(t => {
+            if(!wsEquipIds.includes(t.eqId)) return;
+
+            const row = document.getElementById('row-' + t.eqId);
+            const startD = new Date(t.start);
+            const endD = new Date(t.end);
+            const diffS = Math.round((startD - startDateBase) / 86400000);
+            const duration = Math.round((endD - startD) / 86400000) + 1;
+
+            if(diffS + duration < 0 || diffS > 365) return;
+
+            const bar = document.createElement('div');
+            bar.className = 'task-bar';
+            bar.innerHTML = `<span>${t.name}</span><span class="op">👤 ${t.op}</span>`;
+            
+            if(t.type==='oeb4') bar.style.background = 'var(--oeb4-color)';
+            else if(t.type==='clean') bar.style.background = 'var(--clean-color)';
+            else bar.style.background = 'var(--normal-color)';
+
+            // 位置计算：左偏移 = 侧边栏宽 + (天数 * 格子宽)
+            bar.style.left = `calc(var(--sidebar-w) + ${diffS * 60 + 2}px)`;
+            bar.style.width = (duration * 60 - 4) + 'px';
+            
+            bar.onclick = (e) => { e.stopPropagation(); editTask(t.id); };
+            row.appendChild(bar);
+        });
+    }
+
+    // 6. 弹窗逻辑
+    function openTaskModal(eqId, dayIdx) {
+        const d = new Date(startDateBase); d.setDate(d.getDate() + dayIdx);
+        document.getElementById('editId').value = '';
+        document.getElementById('taskName').value = '';
+        document.getElementById('taskStart').value = d.toISOString().split('T')[0];
+        document.getElementById('taskDays').value = 1;
+        document.getElementById('taskModal').dataset.eqId = eqId;
+        document.getElementById('btnDel').style.display = 'none';
+        document.getElementById('opLabel').innerText = currentUser;
+        
+        document.getElementById('overlay').style.display = 'block';
+        document.getElementById('taskModal').style.display = 'block';
+    }
+
+    function editTask(id) {
+        const t = tasks.find(x => x.id === id);
+        document.getElementById('editId').value = t.id;
+        document.getElementById('taskName').value = t.name;
+        document.getElementById('taskStart').value = t.start;
+        document.getElementById('taskType').value = t.type;
+        document.getElementById('opLabel').innerText = t.op;
+        
+        const s = new Date(t.start); const e = new Date(t.end);
+        document.getElementById('taskDays').value = Math.round((e-s)/86400000)+1;
+        
+        document.getElementById('taskModal').dataset.eqId = t.eqId;
+        document.getElementById('btnDel').style.display = 'block';
+        document.getElementById('overlay').style.display = 'block';
+        document.getElementById('taskModal').style.display = 'block';
+    }
+
+    function saveTask() {
+        const id = document.getElementById('editId').value;
+        const startStr = document.getElementById('taskStart').value;
+        const days = parseInt(document.getElementById('taskDays').value);
+        const startD = new Date(startStr);
+        const endD = new Date(startD); endD.setDate(startD.getDate() + days - 1);
+
+        const data = {
+            id: id ? parseInt(id) : Date.now(),
+            name: document.getElementById('taskName').value || '未命名批次',
+            start: startStr,
+            end: endD.toISOString().split('T')[0],
+            type: document.getElementById('taskType').value,
+            eqId: document.getElementById('taskModal').dataset.eqId,
+            op: currentUser
+        };
+
+        if(id) tasks = tasks.map(x => x.id === data.id ? data : x);
+        else tasks.push(data);
+
+        localStorage.setItem('gantt_final_db', JSON.stringify(tasks));
+        renderTasks();
+        closeModal();
+    }
+
+    function delTask() {
+        const id = parseInt(document.getElementById('editId').value);
+        if(confirm('确定删除？')) {
+            tasks = tasks.filter(x => x.id !== id);
+            localStorage.setItem('gantt_final_db', JSON.stringify(tasks));
+            renderTasks();
+            closeModal();
+        }
+    }
+
+    function closeModal() {
+        document.getElementById('overlay').style.display = 'none';
+        document.getElementById('taskModal').style.display = 'none';
+    }
+
+    // 7. 导出 Excel
+    function doExport() {
+        const exportData = tasks.map(t => {
+            const eq = allEquips.find(e => e.id === t.eqId);
+            return {
+                '车间': eq.ws,
+                '设备': eq.name,
+                '批次/任务': t.name,
+                '开始日期': t.start,
+                '结束日期': t.end,
+                '风险类型': t.type==='oeb4'?'高活性':(t.type==='clean'?'清场':'普通'),
+                '最后操作人': t.op
+            };
+        });
+        const ws = XLSX.utils.json_to_sheet(exportData);
+        const wb = XLSX.utils.book_new();
+        XLSX.utils.book_append_sheet(wb, ws, "生产计划");
+        XLSX.writeFile(wb, `排产表_${new Date().toLocaleDateString()}.xlsx`);
+    }
+
+    function doReset() { if(confirm('重置将删除所有本地数据！')) { tasks = []; localStorage.clear(); location.reload(); } }
+</script>
+
+</body>
+</html>
